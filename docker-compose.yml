@@ -1,0 +1,39 @@
+services:
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MIN_AVAILABLE_MEMORY_MB: 256
+      TASK_DURATION_SCALE: 1.0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: python -m app.worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MIN_AVAILABLE_MEMORY_MB: 256
+      TASK_DURATION_SCALE: 1.0
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+  tests:
+    build: .
+    command: pytest -q
+    profiles:
+      - test
+
+volumes:
+  redis-data:

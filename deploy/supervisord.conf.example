@@ -1,0 +1,15 @@
+[program:circuit-breaker-worker]
+directory=/srv/circuit-breaker
+command=/srv/circuit-breaker/.venv/bin/python -m app.worker
+autostart=true
+autorestart=true
+startsecs=3
+stopwaitsecs=30
+stdout_logfile=/var/log/circuit-breaker-worker.out.log
+stderr_logfile=/var/log/circuit-breaker-worker.err.log
+environment=REDIS_URL="redis://localhost:6379/0",MIN_AVAILABLE_MEMORY_MB="256"
+
+; Multiple worker processes are safe because Redis WATCH/MULTI protects
+; concurrency slot acquisition.
+numprocs=1
+process_name=%(program_name)s_%(process_num)02d
