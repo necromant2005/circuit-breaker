@@ -1,25 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
-import psutil
-
+from app.main import (
+    GLOBAL_MAX_SUBTASK_PROCESSES,
+    MAX_SUBPROCESS_TIMEOUT_SECONDS,
+    MIN_AVAILABLE_MEMORY_MB,
+    TASK_DURATION_SCALE,
+    memory_is_available,
+    release_run_concurrency,
+)
 from app.models import ErrorCode, PlannedOutcome, TaskStatus
-from app.storage import GLOBAL_CONCURRENCY_LIMIT, RedisStorage, get_redis, utc_now
-
-
-MIN_AVAILABLE_MEMORY_MB = int(os.getenv("MIN_AVAILABLE_MEMORY_MB", "256"))
-TASK_DURATION_SCALE = float(os.getenv("TASK_DURATION_SCALE", "1.0"))
-
-
-def available_memory_mb() -> float:
-    return psutil.virtual_memory().available / 1024 / 1024
-
-
-def memory_is_available(threshold_mb: int = MIN_AVAILABLE_MEMORY_MB) -> bool:
-    return available_memory_mb() >= threshold_mb
+from app.storage import RedisStorage, get_redis, utc_now
 
 
 class Worker:
@@ -31,6 +24,7 @@ class Worker:
 
     async def run_forever(self) -> None:
         await self.storage.repair_running_state()
+        await self._release_finished_run_reservations()
         while not self._stopping:
             await self.process_once()
             self._cleanup_finished_tasks()
@@ -47,6 +41,7 @@ class Worker:
 
         task = await self.storage.get_task(task_id)
         if not task or task["status"] in {
+            TaskStatus.RUNNING.value,
             TaskStatus.COMPLETED.value,
             TaskStatus.FAILED.value,
         }:
@@ -57,7 +52,12 @@ class Worker:
             return False
 
         if not await self._can_start_task(run, task):
-            await self.storage.enqueue_task(task_id)
+            refreshed_task = await self.storage.get_task(task_id)
+            if refreshed_task and refreshed_task["status"] not in {
+                TaskStatus.COMPLETED.value,
+                TaskStatus.FAILED.value,
+            }:
+                await self.storage.enqueue_task(task_id)
             await asyncio.sleep(0.2)
             return False
 
@@ -67,18 +67,17 @@ class Worker:
         return True
 
     async def _can_start_task(self, run: dict[str, Any], task: dict[str, Any]) -> bool:
-        global_running = await self.storage.global_running_count()
-        if global_running >= GLOBAL_CONCURRENCY_LIMIT:
+        running_summary = await self.storage.summarize_running_tasks(run["run_id"])
+        if running_summary["global_running"] >= running_summary["global_limit"]:
             task["blocked_reason"] = ErrorCode.GLOBAL_CONCURRENCY_LIMIT.value
             task["message"] = (
-                "Task is waiting because the global concurrency limit of "
-                f"{GLOBAL_CONCURRENCY_LIMIT} running tasks has been reached."
+                "Task is waiting because the global subtask process limit of "
+                f"{running_summary['global_limit']} running processes has been reached."
             )
             await self.storage.update_task(task)
             return False
 
-        run_running = await self.storage.run_running_count(run["run_id"])
-        if run_running >= int(run["max_concurrency"]):
+        if running_summary["run_running"] >= int(run["max_concurrency"]):
             task["blocked_reason"] = "run_concurrency_limit"
             task["message"] = (
                 "Task is waiting because the run concurrency limit of "
@@ -94,7 +93,7 @@ class Worker:
             await self.storage.update_task(task)
             return False
 
-        if not memory_is_available():
+        if not memory_is_available(MIN_AVAILABLE_MEMORY_MB):
             await self.storage.release_slots(run["run_id"])
             task["blocked_reason"] = ErrorCode.INSUFFICIENT_MEMORY.value
             task["message"] = (
@@ -116,13 +115,12 @@ class Worker:
         await self.storage.mark_run_running(run["run_id"])
 
         try:
-            await asyncio.sleep(float(task["duration"]) * TASK_DURATION_SCALE)
+            await self._run_subprocess_simulation(task)
             outcome = self._outcome_for_attempt(task)
             if outcome == PlannedOutcome.COMPLETED.value:
                 task["status"] = TaskStatus.COMPLETED.value
                 task["result"] = task["planned_result"]
                 task["error"] = None
-                task["reason"] = None
                 task["message"] = "Task completed successfully."
                 task["finished_at"] = utc_now()
                 await self.storage.update_task(task)
@@ -145,6 +143,25 @@ class Worker:
             )
             task["finished_at"] = utc_now()
             await self.storage.update_task(task)
+        except TimeoutError:
+            task["error"] = ErrorCode.TASK_TIMEOUT.value
+            task["reason"] = "subprocess_timeout"
+            if int(task["attempt"]) < 2:
+                task["status"] = TaskStatus.RETRYING.value
+                task["message"] = (
+                    f"Task attempt {task['attempt']} reached the "
+                    f"{MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout; retrying once."
+                )
+                await self.storage.update_task(task)
+                await self.storage.enqueue_task(task["task_id"])
+            else:
+                task["status"] = TaskStatus.FAILED.value
+                task["message"] = (
+                    "Task failed because the subprocess reached the "
+                    f"{MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout twice."
+                )
+                task["finished_at"] = utc_now()
+                await self.storage.update_task(task)
         except Exception as exc:
             task["error"] = ErrorCode.UNKNOWN_ERROR.value
             task["reason"] = type(exc).__name__
@@ -160,6 +177,22 @@ class Worker:
         finally:
             await self.storage.release_slots(run["run_id"])
             await self.storage.refresh_run_terminal_state(run["run_id"])
+            await self._release_run_reservation_if_terminal(run["run_id"])
+
+    async def _run_subprocess_simulation(
+        self,
+        task: dict[str, Any],
+    ) -> None:
+        duration = float(task["duration"])
+        if int(task.get("attempt", 1)) > 1 and task.get("retry_duration") is not None:
+            duration = float(task["retry_duration"])
+        runtime = duration * TASK_DURATION_SCALE
+        if runtime >= MAX_SUBPROCESS_TIMEOUT_SECONDS:
+            await asyncio.sleep(MAX_SUBPROCESS_TIMEOUT_SECONDS)
+            raise TimeoutError(
+                f"subprocess reached {MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout"
+            )
+        await asyncio.sleep(runtime)
 
     def _outcome_for_attempt(self, task: dict[str, Any]) -> str:
         if int(task["attempt"]) == 1:
@@ -167,11 +200,28 @@ class Worker:
         return task["planned_retry_attempt_outcome"] or task["planned_first_attempt_outcome"]
 
     def _error_for_outcome(self, outcome: str) -> str:
-        if outcome == PlannedOutcome.TIMEOUT.value:
-            return ErrorCode.TASK_TIMEOUT.value
         if outcome == PlannedOutcome.FAILED.value:
             return ErrorCode.TASK_FAILED.value
+        if outcome == PlannedOutcome.TIMEOUT.value:
+            return ErrorCode.TASK_TIMEOUT.value
         return ErrorCode.UNKNOWN_ERROR.value
+
+    async def _release_run_reservation_if_terminal(self, run_id: str) -> None:
+        release_amount = await self.storage.mark_run_concurrency_released(run_id)
+        if release_amount:
+            await release_run_concurrency(self.storage.redis, release_amount)
+
+    async def _release_finished_run_reservations(self) -> None:
+        cursor = 0
+        while True:
+            cursor, keys = await self.storage.redis.scan(cursor=cursor, match="run:*")
+            for key in keys:
+                if key.endswith(":tasks") or key.endswith(":running_tasks"):
+                    continue
+                run_id = key.removeprefix("run:")
+                await self._release_run_reservation_if_terminal(run_id)
+            if cursor == 0:
+                break
 
     def _cleanup_finished_tasks(self) -> None:
         self.running = {task for task in self.running if not task.done()}
@@ -179,7 +229,12 @@ class Worker:
 
 async def main() -> None:
     redis = get_redis()
-    worker = Worker(RedisStorage(redis))
+    worker = Worker(
+        RedisStorage(
+            redis,
+            global_concurrency_limit=GLOBAL_MAX_SUBTASK_PROCESSES,
+        )
+    )
     try:
         await worker.run_forever()
     finally:

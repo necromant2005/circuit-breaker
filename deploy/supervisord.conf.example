@@ -7,7 +7,7 @@ startsecs=3
 stopwaitsecs=30
 stdout_logfile=/var/log/circuit-breaker-worker.out.log
 stderr_logfile=/var/log/circuit-breaker-worker.err.log
-environment=REDIS_URL="redis://localhost:6379/0",MIN_AVAILABLE_MEMORY_MB="256"
+environment=REDIS_URL="redis://localhost:6379/0"
 
 ; Multiple worker processes are safe because Redis WATCH/MULTI protects
 ; concurrency slot acquisition.

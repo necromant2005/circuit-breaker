@@ -5,6 +5,7 @@ import os
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from redis.asyncio import Redis
@@ -15,7 +16,6 @@ from app.planner import build_task_plan
 from app.schemas import CreateRunRequest
 
 
-GLOBAL_CONCURRENCY_LIMIT = 10
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 TASK_QUEUE_KEY = "queue:tasks"
 RUN_QUEUE_KEY = "queue:runs"
@@ -38,10 +38,23 @@ def get_redis() -> Redis:
 
 
 class RedisStorage:
-    def __init__(self, redis: Redis) -> None:
+    def __init__(
+        self,
+        redis: Redis,
+        *,
+        global_concurrency_limit: int = 1000,
+    ) -> None:
         self.redis = redis
+        self.global_concurrency_limit = global_concurrency_limit
 
-    async def create_run(self, request: CreateRunRequest) -> dict[str, Any]:
+    async def create_run(
+        self,
+        request: CreateRunRequest,
+        *,
+        execution_variations: Mapping[str, Mapping[str, str | None]]
+        | Sequence[Mapping[str, str | None] | tuple[str, str | None]]
+        | None = None,
+    ) -> dict[str, Any]:
         active_key = self._active_seed_key(request.seed)
         existing_run_id = await self.redis.get(active_key)
         if existing_run_id:
@@ -68,12 +81,14 @@ class RedisStorage:
             "updated_at": now,
             "started_at": None,
             "finished_at": None,
+            "concurrency_released": False,
         }
         tasks = build_task_plan(
             run_id=run_id,
             scenario=request.scenario,
             run_seed=request.seed,
             count=request.count,
+            execution_variations=execution_variations,
         )
         for task in tasks:
             task["created_at"] = now
@@ -93,10 +108,16 @@ class RedisStorage:
 
         try:
             pipe = self.redis.pipeline(transaction=True)
-            pipe.set(self._run_key(run_id), self._dumps(run))
+            pipe.set(
+                self._run_key(run_id),
+                self._dumps(run),
+            )
             pipe.delete(self._run_tasks_key(run_id))
             for task in tasks:
-                pipe.set(self._task_key(task["task_id"]), self._dumps(task))
+                pipe.set(
+                    self._task_key(task["task_id"]),
+                    self._dumps(task),
+                )
                 pipe.rpush(self._run_tasks_key(run_id), task["task_id"])
                 pipe.rpush(TASK_QUEUE_KEY, task["task_id"])
             pipe.rpush(RUN_QUEUE_KEY, run_id)
@@ -107,6 +128,24 @@ class RedisStorage:
             raise
 
         return run
+
+    async def active_run_concurrency_total(self) -> int:
+        total = 0
+        cursor = 0
+        while True:
+            cursor, keys = await self.redis.scan(cursor=cursor, match="run:*")
+            for key in keys:
+                if key.endswith(":tasks") or key.endswith(":running_tasks"):
+                    continue
+                raw = await self.redis.get(key)
+                if not raw:
+                    continue
+                run = self._loads(raw)
+                if run.get("status") in {RunStatus.QUEUED.value, RunStatus.RUNNING.value}:
+                    total += int(run.get("max_concurrency", 0))
+            if cursor == 0:
+                break
+        return total
 
     async def get_run(self, run_id: str | None) -> dict[str, Any] | None:
         if not run_id:
@@ -129,11 +168,17 @@ class RedisStorage:
 
     async def update_run(self, run: dict[str, Any]) -> None:
         run["updated_at"] = utc_now()
-        await self.redis.set(self._run_key(run["run_id"]), self._dumps(run))
+        await self.redis.set(
+            self._run_key(run["run_id"]),
+            self._dumps(run),
+        )
 
     async def update_task(self, task: dict[str, Any]) -> None:
         task["updated_at"] = utc_now()
-        await self.redis.set(self._task_key(task["task_id"]), self._dumps(task))
+        await self.redis.set(
+            self._task_key(task["task_id"]),
+            self._dumps(task),
+        )
 
     async def enqueue_task(self, task_id: str) -> None:
         await self.redis.rpush(TASK_QUEUE_KEY, task_id)
@@ -153,7 +198,7 @@ class RedisStorage:
                     global_running = int(await pipe.get(GLOBAL_RUNNING_KEY) or 0)
                     run_running = int(await pipe.get(run_key) or 0)
                     if (
-                        global_running >= GLOBAL_CONCURRENCY_LIMIT
+                        global_running >= self.global_concurrency_limit
                         or run_running >= max_concurrency
                     ):
                         await pipe.unwatch()
@@ -191,6 +236,29 @@ class RedisStorage:
     async def run_running_count(self, run_id: str) -> int:
         value = await self.redis.get(self._run_running_key(run_id))
         return int(value or 0)
+
+    async def summarize_running_tasks(self, run_id: str) -> dict[str, int]:
+        summary = {
+            "global_running": 0,
+            "run_running": 0,
+            "global_limit": self.global_concurrency_limit,
+        }
+        cursor = 0
+        while True:
+            cursor, keys = await self.redis.scan(cursor=cursor, match="task:*")
+            for key in keys:
+                raw = await self.redis.get(key)
+                if not raw:
+                    continue
+                task = self._loads(raw)
+                if task.get("status") != TaskStatus.RUNNING.value:
+                    continue
+                summary["global_running"] += 1
+                if task.get("run_id") == run_id:
+                    summary["run_running"] += 1
+            if cursor == 0:
+                break
+        return summary
 
     async def summarize_run(self, run_id: str) -> dict[str, int]:
         tasks = await self.get_run_tasks(run_id)
@@ -236,6 +304,37 @@ class RedisStorage:
         await self.update_run(run)
         await self.redis.delete(self._active_seed_key(run["seed"]))
 
+    async def mark_run_concurrency_released(self, run_id: str) -> int | None:
+        run_key = self._run_key(run_id)
+        async with self.redis.pipeline() as pipe:
+            while True:
+                try:
+                    await pipe.watch(run_key)
+                    raw = await pipe.get(run_key)
+                    if not raw:
+                        await pipe.unwatch()
+                        return None
+                    run = self._loads(raw)
+                    if (
+                        run.get("status")
+                        not in {RunStatus.COMPLETED.value, RunStatus.FAILED.value}
+                        or run.get("concurrency_released")
+                    ):
+                        await pipe.unwatch()
+                        return None
+                    release_amount = int(run.get("max_concurrency", 0))
+                    run["concurrency_released"] = True
+                    run["updated_at"] = utc_now()
+                    pipe.multi()
+                    pipe.set(
+                        run_key,
+                        self._dumps(run),
+                    )
+                    await pipe.execute()
+                    return release_amount
+                except WatchError:
+                    continue
+
     async def mark_run_running(self, run_id: str) -> None:
         run = await self.get_run(run_id)
         if not run or run["status"] != RunStatus.QUEUED.value:
@@ -244,7 +343,10 @@ class RedisStorage:
         run["status"] = RunStatus.RUNNING.value
         run["started_at"] = now
         run["updated_at"] = now
-        await self.redis.set(self._run_key(run_id), self._dumps(run))
+        await self.redis.set(
+            self._run_key(run_id),
+            self._dumps(run),
+        )
 
     async def repair_running_state(self) -> None:
         await self.redis.set(GLOBAL_RUNNING_KEY, 0)

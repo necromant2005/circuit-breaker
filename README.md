@@ -29,12 +29,8 @@ Useful environment variables:
 
 ```bash
 REDIS_URL=redis://localhost:6379/0
-MIN_AVAILABLE_MEMORY_MB=256
 TASK_DURATION_SCALE=1.0
 ```
-
-`TASK_DURATION_SCALE` is useful for tests or demos. For example,
-`TASK_DURATION_SCALE=0.1` makes a planned 10 second task run for 1 second.
 
 ## API
 
@@ -44,6 +40,15 @@ Create a run:
 curl -X POST http://localhost:8000/runs \
   -H 'Content-Type: application/json' \
   -d '{"scenario":"demo","count":5,"seed":42,"max_concurrency":3}'
+```
+
+Service limits are defined at the top of `app/main.py`:
+
+```python
+GLOBAL_MAX_SUBTASK_PROCESSES = 1000
+MAX_TASK_RECORD_SIZE_BYTES = 100_000
+MIN_AVAILABLE_MEMORY_MB = 256
+MAX_SUBPROCESS_TIMEOUT_SECONDS = 11
 ```
 
 Get run state:

@@ -2,16 +2,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models import RunStatus, TaskStatus
 
 
 class CreateRunRequest(BaseModel):
-    scenario: str = Field(..., min_length=1)
-    count: int = Field(..., ge=1)
-    seed: int
-    max_concurrency: int = Field(..., ge=1, le=10)
+    model_config = ConfigDict(extra="forbid")
+
+    scenario: str = Field(..., min_length=1, strict=True)
+    count: int = Field(..., ge=1, strict=True)
+    seed: int = Field(..., strict=True)
+    max_concurrency: int = Field(..., ge=1, strict=True)
+
+    @field_validator("scenario")
+    @classmethod
+    def scenario_must_not_be_blank(cls, value: str) -> str:
+        scenario = value.strip()
+        if not scenario:
+            raise ValueError("scenario must not be blank")
+        return scenario
 
 
 class CreateRunResponse(BaseModel):
@@ -54,6 +64,8 @@ class TaskResponse(BaseModel):
     status: TaskStatus
     attempt: int
     duration: float
+    retry_duration: float | None = None
+    planned_execution_case: str | None = None
     planned_first_attempt_outcome: str
     planned_retry_attempt_outcome: str | None = None
     result: dict[str, Any] | None = None

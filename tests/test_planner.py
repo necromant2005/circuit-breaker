@@ -1,4 +1,17 @@
+from app.main import TASK_EXECUTION_VARIATIONS
 from app.planner import build_task_plan, derive_child_seed
+
+
+EXPECTED_VARIATIONS = [
+    ("success_first_attempt", "completed", None),
+    ("failed_then_success", "failed", "completed"),
+    ("timeout_then_success", "timeout", "completed"),
+    ("failed_then_failed", "failed", "failed"),
+    ("failed_then_timeout", "failed", "timeout"),
+    ("timeout_then_failed", "timeout", "failed"),
+    ("timeout_then_timeout", "timeout", "timeout"),
+    ("success_first_attempt", "completed", None),
+]
 
 
 def test_child_seed_is_stable() -> None:
@@ -10,3 +23,22 @@ def test_same_seed_produces_same_execution_plan() -> None:
     first = build_task_plan(run_id="run-a", scenario="demo", run_seed=42, count=3)
     second = build_task_plan(run_id="run-a", scenario="demo", run_seed=42, count=3)
     assert first == second
+
+
+def test_planner_assigns_execution_variations_by_task_index() -> None:
+    tasks = build_task_plan(
+        run_id="run-a",
+        scenario="demo",
+        run_seed=42,
+        count=8,
+        execution_variations=TASK_EXECUTION_VARIATIONS,
+    )
+
+    assert [
+        (
+            task["planned_execution_case"],
+            task["planned_first_attempt_outcome"],
+            task["planned_retry_attempt_outcome"],
+        )
+        for task in tasks
+    ] == EXPECTED_VARIATIONS
