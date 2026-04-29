@@ -25,15 +25,10 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis-data:/data
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   tests:
     build: .
     command: pytest -q
     profiles:
       - test
-
-volumes:
-  redis-data:
