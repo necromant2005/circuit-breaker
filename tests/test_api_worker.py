@@ -719,6 +719,55 @@ async def test_retry_waits_before_requeue(storage, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_delay_increases_with_failed_count(storage, monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.TASK_DURATION_SCALE", 1)
+    monkeypatch.setattr("app.worker.RETRY_DELAY_SECONDS", 2)
+    sleeps = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        return None
+
+    monkeypatch.setattr("app.worker.asyncio.sleep", fake_sleep)
+    worker = Worker(storage, poll_timeout=0)
+
+    await worker._delay_before_retry(failed_count=1)
+    await worker._delay_before_retry(failed_count=2)
+
+    assert sleeps == [2, 4]
+
+
+@pytest.mark.asyncio
+async def test_configured_retry_count_allows_more_attempts(storage, monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.TASK_DURATION_SCALE", 0)
+    monkeypatch.setattr("app.worker.MAX_TASK_RETRIES", 2)
+    run = await storage.create_run(
+        CreateRunRequest(scenario="demo", count=1, seed=109, max_concurrency=1)
+    )
+    task = (await storage.get_run_tasks(run["run_id"]))[0]
+    task["duration"] = 2
+    task["retry_duration"] = 2
+    task["planned_first_attempt_outcome"] = PlannedOutcome.FAILED.value
+    task["planned_retry_attempt_outcome"] = PlannedOutcome.FAILED.value
+    await storage.update_task(task)
+
+    worker = Worker(storage, poll_timeout=0)
+    for expected_attempt in (1, 2):
+        assert await worker.process_once() is True
+        await asyncio.gather(*worker.running)
+        task = await storage.get_task(task["task_id"])
+        assert task["status"] == TaskStatus.RETRYING.value
+        assert task["attempt"] == expected_attempt
+
+    assert await worker.process_once() is True
+    await asyncio.gather(*worker.running)
+    task = await storage.get_task(task["task_id"])
+    assert task["status"] == TaskStatus.FAILED.value
+    assert task["attempt"] == 3
+    assert task["error"] == ErrorCode.TASK_FAILED.value
+
+
+@pytest.mark.asyncio
 async def test_subprocess_timeout_kills_and_retries_once(storage, monkeypatch) -> None:
     monkeypatch.setattr("app.worker.MAX_SUBPROCESS_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr("app.worker.TASK_DURATION_SCALE", 1)

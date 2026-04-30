@@ -31,12 +31,13 @@ MIN_AVAILABLE_MEMORY_MB = 256
 MIN_TASK_DURATION_SECONDS = 2
 MAX_TASK_DURATION_SECONDS = 10
 MAX_SUBPROCESS_TIMEOUT_SECONDS = 11
+MAX_TASK_RETRIES = 1
 RETRY_DELAY_SECONDS = 1
 TASK_DURATION_SCALE = float(os.getenv("TASK_DURATION_SCALE", "1.0"))
 
 # Task execution policy:
 # task_index % len(TASK_EXECUTION_VARIATIONS) selects one of these plans in order.
-# "completed" means the attempt succeeds. Failed or timeout first attempts get one retry.
+# "completed" means the attempt succeeds. Failed or timeout attempts can retry.
 TASK_EXECUTION_VARIATIONS = {
     "success_first_attempt": {"attempt_1": "completed", "attempt_2": None},
     "failed_then_success": {"attempt_1": "failed", "attempt_2": "completed"},
@@ -46,6 +47,13 @@ TASK_EXECUTION_VARIATIONS = {
     "timeout_then_failed": {"attempt_1": "timeout", "attempt_2": "failed"},
     "timeout_then_timeout": {"attempt_1": "timeout", "attempt_2": "timeout"},
 }
+
+
+def retry_delay_seconds(
+    failed_count: int,
+    default_delay_seconds: int = RETRY_DELAY_SECONDS,
+) -> int:
+    return default_delay_seconds * failed_count
 
 
 @asynccontextmanager

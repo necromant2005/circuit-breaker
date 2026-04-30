@@ -5,12 +5,14 @@ from typing import Any
 
 from app.main import (
     GLOBAL_MAX_SUBTASK_PROCESSES,
+    MAX_TASK_RETRIES,
     MAX_SUBPROCESS_TIMEOUT_SECONDS,
     MIN_AVAILABLE_MEMORY_MB,
     RETRY_DELAY_SECONDS,
     TASK_DURATION_SCALE,
     memory_is_available,
     release_run_concurrency,
+    retry_delay_seconds,
 )
 from app.models import ErrorCode, PlannedOutcome, TaskStatus
 from app.storage import RedisStorage, get_redis, utc_now
@@ -129,13 +131,13 @@ class Worker:
 
             task["error"] = self._error_for_outcome(outcome)
             task["reason"] = outcome
-            if int(task["attempt"]) < 2:
+            if self._can_retry(task):
                 task["status"] = TaskStatus.RETRYING.value
                 task["message"] = (
-                    f"Task attempt {task['attempt']} ended with {outcome}; retrying once."
+                    f"Task attempt {task['attempt']} ended with {outcome}; retrying."
                 )
                 await self.storage.update_task(task)
-                await self._delay_before_retry()
+                await self._delay_before_retry(int(task["attempt"]))
                 await self.storage.enqueue_task(task["task_id"])
                 return
 
@@ -148,14 +150,14 @@ class Worker:
         except TimeoutError:
             task["error"] = ErrorCode.TASK_TIMEOUT.value
             task["reason"] = PlannedOutcome.TIMEOUT.value
-            if int(task["attempt"]) < 2:
+            if self._can_retry(task):
                 task["status"] = TaskStatus.RETRYING.value
                 task["message"] = (
                     f"Task attempt {task['attempt']} reached the "
-                    f"{MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout; retrying once."
+                    f"{MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout; retrying."
                 )
                 await self.storage.update_task(task)
-                await self._delay_before_retry()
+                await self._delay_before_retry(int(task["attempt"]))
                 await self.storage.enqueue_task(task["task_id"])
             else:
                 task["status"] = TaskStatus.FAILED.value
@@ -169,10 +171,10 @@ class Worker:
             task["error"] = ErrorCode.UNKNOWN_ERROR.value
             task["reason"] = type(exc).__name__
             task["message"] = f"Task failed with unexpected error: {exc}"
-            if int(task["attempt"]) < 2:
+            if self._can_retry(task):
                 task["status"] = TaskStatus.RETRYING.value
                 await self.storage.update_task(task)
-                await self._delay_before_retry()
+                await self._delay_before_retry(int(task["attempt"]))
                 await self.storage.enqueue_task(task["task_id"])
             else:
                 task["status"] = TaskStatus.FAILED.value
@@ -209,10 +211,13 @@ class Worker:
             )
         await asyncio.sleep(runtime)
 
-    async def _delay_before_retry(self) -> None:
-        delay = RETRY_DELAY_SECONDS * TASK_DURATION_SCALE
+    async def _delay_before_retry(self, failed_count: int) -> None:
+        delay = retry_delay_seconds(failed_count, RETRY_DELAY_SECONDS) * TASK_DURATION_SCALE
         if delay > 0:
             await asyncio.sleep(delay)
+
+    def _can_retry(self, task: dict[str, Any]) -> bool:
+        return int(task["attempt"]) <= MAX_TASK_RETRIES
 
     def _outcome_for_attempt(self, task: dict[str, Any]) -> str:
         if int(task["attempt"]) == 1:
