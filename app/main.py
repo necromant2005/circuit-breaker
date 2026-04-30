@@ -28,7 +28,10 @@ GLOBAL_MAX_SUBTASK_PROCESSES = 1000
 ACTIVE_RUN_CONCURRENCY_KEY = "active_runs:reserved_concurrency"
 MAX_TASK_RECORD_SIZE_BYTES = 100_000
 MIN_AVAILABLE_MEMORY_MB = 256
+MIN_TASK_DURATION_SECONDS = 2
+MAX_TASK_DURATION_SECONDS = 10
 MAX_SUBPROCESS_TIMEOUT_SECONDS = 11
+RETRY_DELAY_SECONDS = 1
 TASK_DURATION_SCALE = float(os.getenv("TASK_DURATION_SCALE", "1.0"))
 
 # Task execution policy:
@@ -198,6 +201,9 @@ async def create_run(payload: CreateRunRequest, request: Request) -> CreateRunRe
         run = await storage.create_run(
             payload,
             execution_variations=TASK_EXECUTION_VARIATIONS,
+            min_task_duration_seconds=MIN_TASK_DURATION_SECONDS,
+            max_task_duration_seconds=MAX_TASK_DURATION_SECONDS,
+            timeout_seconds=MAX_SUBPROCESS_TIMEOUT_SECONDS,
         )
     except DuplicateActiveSeedError as exc:
         if reserved:

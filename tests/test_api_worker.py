@@ -633,8 +633,89 @@ async def test_planner_timeout_outcome_is_not_caused_by_short_duration(storage) 
         CreateRunRequest(scenario="demo", count=3, seed=4, max_concurrency=1)
     )
     task = (await storage.get_run_tasks(run["run_id"]))[2]
-    assert task["duration"] < 11
     assert task["planned_first_attempt_outcome"] == PlannedOutcome.TIMEOUT.value
+    assert task["duration"] == 11
+
+
+@pytest.mark.asyncio
+async def test_planned_timeout_attempt_runs_until_kill_timeout(storage, monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.MAX_SUBPROCESS_TIMEOUT_SECONDS", 11)
+    monkeypatch.setattr("app.worker.TASK_DURATION_SCALE", 1)
+    sleeps = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        return None
+
+    monkeypatch.setattr("app.worker.asyncio.sleep", fake_sleep)
+    worker = Worker(storage, poll_timeout=0)
+
+    with pytest.raises(TimeoutError):
+        await worker._run_subprocess_simulation(
+            {
+                "attempt": 1,
+                "duration": 2,
+                "planned_first_attempt_outcome": PlannedOutcome.TIMEOUT.value,
+            }
+        )
+
+    assert sleeps == [11]
+
+
+@pytest.mark.asyncio
+async def test_success_attempt_uses_planned_two_to_ten_second_duration(
+    storage,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.worker.MAX_SUBPROCESS_TIMEOUT_SECONDS", 11)
+    monkeypatch.setattr("app.worker.TASK_DURATION_SCALE", 1)
+    sleeps = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        return None
+
+    monkeypatch.setattr("app.worker.asyncio.sleep", fake_sleep)
+    worker = Worker(storage, poll_timeout=0)
+    await worker._run_subprocess_simulation(
+        {
+            "attempt": 1,
+            "duration": 2,
+            "planned_first_attempt_outcome": PlannedOutcome.COMPLETED.value,
+        }
+    )
+
+    assert sleeps == [2]
+
+
+@pytest.mark.asyncio
+async def test_retry_waits_before_requeue(storage, monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.TASK_DURATION_SCALE", 1)
+    monkeypatch.setattr("app.worker.RETRY_DELAY_SECONDS", 1)
+    sleeps = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        return None
+
+    monkeypatch.setattr("app.worker.asyncio.sleep", fake_sleep)
+    run = await storage.create_run(
+        CreateRunRequest(scenario="demo", count=1, seed=108, max_concurrency=1)
+    )
+    task = (await storage.get_run_tasks(run["run_id"]))[0]
+    task["duration"] = 2
+    task["planned_first_attempt_outcome"] = PlannedOutcome.FAILED.value
+    task["planned_retry_attempt_outcome"] = PlannedOutcome.COMPLETED.value
+    task["planned_result"] = {"ok": True}
+    await storage.update_task(task)
+
+    worker = Worker(storage, poll_timeout=0)
+    assert await worker.process_once() is True
+    await asyncio.gather(*worker.running)
+
+    task = await storage.get_task(task["task_id"])
+    assert task["status"] == TaskStatus.RETRYING.value
+    assert sleeps == [2, 1]
 
 
 @pytest.mark.asyncio
@@ -662,7 +743,7 @@ async def test_subprocess_timeout_kills_and_retries_once(storage, monkeypatch) -
     task = await storage.get_task(task["task_id"])
     assert task["status"] == TaskStatus.RETRYING.value
     assert task["error"] == ErrorCode.TASK_TIMEOUT.value
-    assert task["reason"] == "subprocess_timeout"
+    assert task["reason"] == PlannedOutcome.TIMEOUT.value
 
     await worker.process_once()
     await asyncio.gather(*worker.running)
@@ -700,7 +781,7 @@ async def test_subprocess_timeout_can_succeed_on_retry(storage, monkeypatch) -> 
     task = await storage.get_task(task["task_id"])
     assert task["status"] == TaskStatus.RETRYING.value
     assert task["error"] == ErrorCode.TASK_TIMEOUT.value
-    assert task["reason"] == "subprocess_timeout"
+    assert task["reason"] == PlannedOutcome.TIMEOUT.value
 
     await worker.process_once()
     await asyncio.gather(*worker.running)

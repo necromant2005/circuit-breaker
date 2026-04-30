@@ -7,6 +7,7 @@ from app.main import (
     GLOBAL_MAX_SUBTASK_PROCESSES,
     MAX_SUBPROCESS_TIMEOUT_SECONDS,
     MIN_AVAILABLE_MEMORY_MB,
+    RETRY_DELAY_SECONDS,
     TASK_DURATION_SCALE,
     memory_is_available,
     release_run_concurrency,
@@ -134,6 +135,7 @@ class Worker:
                     f"Task attempt {task['attempt']} ended with {outcome}; retrying once."
                 )
                 await self.storage.update_task(task)
+                await self._delay_before_retry()
                 await self.storage.enqueue_task(task["task_id"])
                 return
 
@@ -145,7 +147,7 @@ class Worker:
             await self.storage.update_task(task)
         except TimeoutError:
             task["error"] = ErrorCode.TASK_TIMEOUT.value
-            task["reason"] = "subprocess_timeout"
+            task["reason"] = PlannedOutcome.TIMEOUT.value
             if int(task["attempt"]) < 2:
                 task["status"] = TaskStatus.RETRYING.value
                 task["message"] = (
@@ -153,6 +155,7 @@ class Worker:
                     f"{MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout; retrying once."
                 )
                 await self.storage.update_task(task)
+                await self._delay_before_retry()
                 await self.storage.enqueue_task(task["task_id"])
             else:
                 task["status"] = TaskStatus.FAILED.value
@@ -169,6 +172,7 @@ class Worker:
             if int(task["attempt"]) < 2:
                 task["status"] = TaskStatus.RETRYING.value
                 await self.storage.update_task(task)
+                await self._delay_before_retry()
                 await self.storage.enqueue_task(task["task_id"])
             else:
                 task["status"] = TaskStatus.FAILED.value
@@ -183,9 +187,20 @@ class Worker:
         self,
         task: dict[str, Any],
     ) -> None:
+        outcome = None
+        if task.get("planned_first_attempt_outcome"):
+            outcome = self._outcome_for_attempt(task)
         duration = float(task["duration"])
         if int(task.get("attempt", 1)) > 1 and task.get("retry_duration") is not None:
             duration = float(task["retry_duration"])
+
+        if outcome == PlannedOutcome.TIMEOUT.value:
+            runtime = max(duration, MAX_SUBPROCESS_TIMEOUT_SECONDS) * TASK_DURATION_SCALE
+            await asyncio.sleep(runtime)
+            raise TimeoutError(
+                f"subprocess reached {MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout"
+            )
+
         runtime = duration * TASK_DURATION_SCALE
         if runtime >= MAX_SUBPROCESS_TIMEOUT_SECONDS:
             await asyncio.sleep(MAX_SUBPROCESS_TIMEOUT_SECONDS)
@@ -193,6 +208,11 @@ class Worker:
                 f"subprocess reached {MAX_SUBPROCESS_TIMEOUT_SECONDS} second kill timeout"
             )
         await asyncio.sleep(runtime)
+
+    async def _delay_before_retry(self) -> None:
+        delay = RETRY_DELAY_SECONDS * TASK_DURATION_SCALE
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     def _outcome_for_attempt(self, task: dict[str, Any]) -> str:
         if int(task["attempt"]) == 1:

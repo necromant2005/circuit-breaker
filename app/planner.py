@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import random
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -75,6 +74,12 @@ def derive_child_seed(run_seed: int, task_index: int) -> int:
     return int(digest[:8], 16)
 
 
+def stable_int(*parts: object) -> int:
+    payload = ":".join(str(part) for part in parts)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    return int(digest[:8], 16)
+
+
 def planned_outcomes_for_task(
     task_index: int,
     *,
@@ -84,6 +89,27 @@ def planned_outcomes_for_task(
     return variations[task_index % len(variations)]
 
 
+def _planned_attempt_duration(
+    child_seed: int,
+    task_index: int,
+    attempt: int,
+    outcome: PlannedOutcome,
+    *,
+    min_task_duration_seconds: int,
+    max_task_duration_seconds: int,
+    timeout_seconds: int,
+) -> int:
+    if outcome == PlannedOutcome.TIMEOUT:
+        return timeout_seconds
+    duration_range = max_task_duration_seconds - min_task_duration_seconds + 1
+    offset = stable_int(child_seed, task_index, attempt, "duration") % duration_range
+    return min_task_duration_seconds + offset
+
+
+def _planned_result_value(child_seed: int, task_index: int) -> int:
+    return 1000 + (stable_int(child_seed, task_index, "result") % 9000)
+
+
 def build_task_plan(
     *,
     run_id: str,
@@ -91,17 +117,38 @@ def build_task_plan(
     run_seed: int,
     count: int,
     execution_variations: ExecutionVariationMap | Sequence[ExecutionVariation] | None = None,
+    min_task_duration_seconds: int = 2,
+    max_task_duration_seconds: int = 10,
+    timeout_seconds: int = 11,
 ) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
 
     for index in range(count):
         child_seed = derive_child_seed(run_seed, index)
-        rng = random.Random(child_seed)
-        duration = rng.randint(2, 10)
         case_name, first_outcome, retry_outcome = planned_outcomes_for_task(
             index,
             execution_variations=execution_variations,
         )
+        duration = _planned_attempt_duration(
+            child_seed,
+            index,
+            1,
+            first_outcome,
+            min_task_duration_seconds=min_task_duration_seconds,
+            max_task_duration_seconds=max_task_duration_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+        retry_duration = None
+        if retry_outcome:
+            retry_duration = _planned_attempt_duration(
+                child_seed,
+                index,
+                2,
+                retry_outcome,
+                min_task_duration_seconds=min_task_duration_seconds,
+                max_task_duration_seconds=max_task_duration_seconds,
+                timeout_seconds=timeout_seconds,
+            )
 
         eventual_success = (
             first_outcome == PlannedOutcome.COMPLETED
@@ -113,7 +160,7 @@ def build_task_plan(
                 "scenario": scenario,
                 "task_index": index,
                 "child_seed": child_seed,
-                "value": rng.randint(1000, 9999),
+                "value": _planned_result_value(child_seed, index),
             }
 
         task_id = f"{run_id}:{index}"
@@ -126,7 +173,7 @@ def build_task_plan(
                 "status": TaskStatus.PENDING.value,
                 "attempt": 0,
                 "duration": float(duration),
-                "retry_duration": float(duration),
+                "retry_duration": float(retry_duration) if retry_duration is not None else None,
                 "planned_execution_case": case_name,
                 "planned_first_attempt_outcome": first_outcome.value,
                 "planned_retry_attempt_outcome": retry_outcome.value if retry_outcome else None,

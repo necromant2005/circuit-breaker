@@ -54,6 +54,9 @@ class RedisStorage:
         execution_variations: Mapping[str, Mapping[str, str | None]]
         | Sequence[Mapping[str, str | None] | tuple[str, str | None]]
         | None = None,
+        min_task_duration_seconds: int = 2,
+        max_task_duration_seconds: int = 10,
+        timeout_seconds: int = 11,
     ) -> dict[str, Any]:
         active_key = self._active_seed_key(request.seed)
         existing_run_id = await self.redis.get(active_key)
@@ -89,6 +92,9 @@ class RedisStorage:
             run_seed=request.seed,
             count=request.count,
             execution_variations=execution_variations,
+            min_task_duration_seconds=min_task_duration_seconds,
+            max_task_duration_seconds=max_task_duration_seconds,
+            timeout_seconds=timeout_seconds,
         )
         for task in tasks:
             task["created_at"] = now
