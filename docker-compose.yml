@@ -1,10 +1,12 @@
 services:
   api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: mix run --no-halt
     environment:
       REDIS_URL: redis://redis:6379/0
       TASK_DURATION_SCALE: 1.0
+      WORKER_ENABLED: "false"
+      PORT: 8000
     ports:
       - "8000:8000"
     depends_on:
@@ -12,10 +14,12 @@ services:
 
   worker:
     build: .
-    command: python -m app.worker
+    command: mix run --no-halt
     environment:
       REDIS_URL: redis://redis:6379/0
       TASK_DURATION_SCALE: 1.0
+      WORKER_ENABLED: "true"
+      PORT: 8001
     depends_on:
       - redis
 
@@ -26,7 +30,16 @@ services:
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   tests:
-    build: .
-    command: pytest -q
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    command: mix test
+    environment:
+      REDIS_URL: redis://redis:6379/1
+      TASK_DURATION_SCALE: 0.0
+      WORKER_ENABLED: "false"
+      PORT: 8002
+    depends_on:
+      - redis
     profiles:
       - test
