@@ -191,7 +191,7 @@ defmodule CircuitBreaker.Worker do
         |> Storage.update_task()
 
         delay_before_retry(to_int(task["attempt"]))
-        Storage.enqueue_task(task["task_id"])
+        Storage.enqueue_retry_task(task["task_id"])
       else
         task
         |> Map.put("status", "failed")
@@ -212,7 +212,7 @@ defmodule CircuitBreaker.Worker do
       |> Storage.update_task()
 
       delay_before_retry(to_int(task["attempt"]))
-      Storage.enqueue_task(task["task_id"])
+      Storage.enqueue_retry_task(task["task_id"])
     else
       task
       |> Map.put("status", "failed")
@@ -232,7 +232,7 @@ defmodule CircuitBreaker.Worker do
     if can_retry?(task) do
       task |> Map.put("status", "retrying") |> Storage.update_task()
       delay_before_retry(to_int(task["attempt"]))
-      Storage.enqueue_task(task["task_id"])
+      Storage.enqueue_retry_task(task["task_id"])
     else
       task |> Map.put("status", "failed") |> Map.put("finished_at", Storage.utc_now()) |> Storage.update_task()
     end

@@ -117,6 +117,7 @@ defmodule CircuitBreaker.Storage do
   end
 
   def enqueue_task(task_id), do: Redix.command(@redis_name, ["RPUSH", @task_queue_key, task_id])
+  def enqueue_retry_task(task_id), do: Redix.command(@redis_name, ["LPUSH", @task_queue_key, task_id])
 
   def pop_task_id(timeout \\ 1) do
     case Redix.command(@redis_name, ["BLPOP", @task_queue_key, timeout]) do
@@ -284,7 +285,7 @@ defmodule CircuitBreaker.Storage do
           })
           |> update_task()
 
-          enqueue_task(task["task_id"])
+          enqueue_retry_task(task["task_id"])
 
         task["status"] == "running" ->
           task
@@ -300,7 +301,7 @@ defmodule CircuitBreaker.Storage do
           refresh_run_terminal_state(task["run_id"])
 
         task["status"] == "retrying" ->
-          enqueue_task(task["task_id"])
+          enqueue_retry_task(task["task_id"])
 
         true ->
           :ok

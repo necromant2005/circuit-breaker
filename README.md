@@ -25,6 +25,12 @@ Start Redis, the API, and the worker:
 docker compose up
 ```
 
+Starting only the API service also starts the worker dependency:
+
+```bash
+docker compose up api
+```
+
 Useful environment variables:
 
 ```bash

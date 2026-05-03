@@ -182,6 +182,42 @@ defmodule CircuitBreaker.WorkerStorageTest do
     end
   end
 
+  test "retry is prioritized before newer pending tasks" do
+    {:ok, run} = create_run(seed: 700, count: 2, max_concurrency: 1)
+    [first, second] = Storage.get_run_tasks(run["run_id"])
+
+    first
+    |> Map.merge(%{
+      "duration" => 0.0,
+      "retry_duration" => 0.0,
+      "planned_first_attempt_outcome" => "failed",
+      "planned_retry_attempt_outcome" => "completed",
+      "planned_result" => %{"task" => "first"}
+    })
+    |> Storage.update_task()
+
+    second
+    |> Map.merge(%{
+      "duration" => 0.0,
+      "planned_first_attempt_outcome" => "completed",
+      "planned_result" => %{"task" => "second"}
+    })
+    |> Storage.update_task()
+
+    assert Worker.process_once_sync(0)
+    first = Storage.get_task(first["task_id"])
+    second = Storage.get_task(second["task_id"])
+    assert first["status"] == "retrying"
+    assert second["status"] == "pending"
+
+    assert Worker.process_once_sync(0)
+    first = Storage.get_task(first["task_id"])
+    second = Storage.get_task(second["task_id"])
+    assert first["status"] == "completed"
+    assert first["attempt"] == 2
+    assert second["status"] == "pending"
+  end
+
   test "configured retry count allows more attempts" do
     Application.put_env(:circuit_breaker, :max_task_retries, 2)
     {:ok, run} = create_run(seed: 109, count: 1, max_concurrency: 1)
