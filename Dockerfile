@@ -1,19 +1,16 @@
-FROM elixir:1.16-alpine
+FROM ruby:3.3-alpine
 
-RUN apk add --no-cache build-base git
+RUN apk add --no-cache build-base
 
 WORKDIR /app
 
-ENV MIX_ENV=prod
+COPY Gemfile Gemfile.lock ./
+RUN bundle install
 
-COPY mix.exs mix.lock ./
-RUN mix local.hex --force && mix local.rebar --force && mix deps.get --only prod
-
-COPY config ./config
+COPY config.ru ./
+COPY bin ./bin
 COPY lib ./lib
-
-RUN mix deps.compile && mix compile
 
 EXPOSE 8000
 
-CMD ["mix", "run", "--no-halt"]
+CMD ["ruby", "bin/server"]

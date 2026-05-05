@@ -1,11 +1,10 @@
 services:
   api:
     build: .
-    command: mix run --no-halt
+    command: ruby bin/server
     environment:
       REDIS_URL: redis://redis:6379/0
       TASK_DURATION_SCALE: 1.0
-      WORKER_ENABLED: "false"
       PORT: 8000
     ports:
       - "8000:8000"
@@ -15,11 +14,10 @@ services:
 
   worker:
     build: .
-    command: mix run --no-halt
+    command: ruby bin/worker
     environment:
       REDIS_URL: redis://redis:6379/0
       TASK_DURATION_SCALE: 1.0
-      WORKER_ENABLED: "true"
       PORT: 8001
     depends_on:
       - redis
@@ -34,11 +32,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.test
-    command: mix test
+    command: ruby -Itest test/all_test.rb
     environment:
       REDIS_URL: redis://redis:6379/1
       TASK_DURATION_SCALE: 0.0
-      WORKER_ENABLED: "false"
       PORT: 8002
     depends_on:
       - redis

@@ -1,16 +1,15 @@
-FROM elixir:1.16-alpine
+FROM ruby:3.3-alpine
 
-RUN apk add --no-cache build-base git
+RUN apk add --no-cache build-base
 
 WORKDIR /app
 
-ENV MIX_ENV=test
+COPY Gemfile Gemfile.lock ./
+RUN bundle install
 
-COPY mix.exs mix.lock ./
-RUN mix local.hex --force && mix local.rebar --force && mix deps.get
-
-COPY config ./config
+COPY config.ru ./
+COPY bin ./bin
 COPY lib ./lib
 COPY test ./test
 
-CMD ["mix", "test"]
+CMD ["ruby", "-Itest", "test/all_test.rb"]

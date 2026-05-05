@@ -1,0 +1,13 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "rackup"
+require_relative "../lib/circuit_breaker"
+
+CircuitBreaker::Main.reconcile_active_run_concurrency
+
+Rackup::Server.start(
+  app: CircuitBreaker::App.new,
+  Host: "0.0.0.0",
+  Port: ENV.fetch("PORT", "8000").to_i
+)

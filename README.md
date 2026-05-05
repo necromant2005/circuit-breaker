@@ -1,12 +1,12 @@
 # Async Run Orchestrator
 
-Small Elixir service for deterministic asynchronous run/task orchestration.
+Small Ruby service for deterministic asynchronous run/task orchestration.
 
 ## Features
 
 - Create a run and split it into deterministic simulated tasks.
 - Persist run state, task state, queues, active seed mapping, and counters in Redis.
-- Execute work in a separate Elixir worker process.
+- Execute work in a separate Ruby worker process.
 - Enforce per-run `max_concurrency` and a global reserved concurrency limit.
 - Retry failed or timed-out tasks once.
 - Expose run summaries, task plans, results, and failure explanations through API.
@@ -36,7 +36,6 @@ Useful environment variables:
 ```bash
 REDIS_URL=redis://localhost:6379/0
 TASK_DURATION_SCALE=1.0
-WORKER_ENABLED=false
 PORT=8000
 ```
 
@@ -50,13 +49,13 @@ curl -X POST http://localhost:8000/runs \
   -d '{"scenario":"demo","count":5,"seed":42,"max_concurrency":3}'
 ```
 
-Service limits are defined in `lib/circuit_breaker/main.ex`:
+Service limits are defined in `lib/circuit_breaker/main.rb`:
 
-```elixir
-@global_max_subtask_processes 1000
-@max_task_record_size_bytes 100_000
-@min_available_memory_mb 256
-@max_subprocess_timeout_seconds 11
+```ruby
+GLOBAL_MAX_SUBTASK_PROCESSES = 1000
+MAX_TASK_RECORD_SIZE_BYTES = 100_000
+MIN_AVAILABLE_MEMORY_MB = 256
+MAX_SUBPROCESS_TIMEOUT_SECONDS = 11
 ```
 
 Get run state:
@@ -75,11 +74,8 @@ curl http://localhost:8000/runs/{run_id}/tasks
 
 Each task gets a stable child seed:
 
-```elixir
-:crypto.hash(:sha256, "#{run_seed}:#{task_index}")
-|> Base.encode16(case: :lower)
-|> binary_part(0, 8)
-|> String.to_integer(16)
+```ruby
+Digest::SHA256.hexdigest("#{run_seed}:#{task_index}")[0, 8].to_i(16)
 ```
 
 The planner persists the duration, first outcome, retry outcome, execution case
